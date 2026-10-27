@@ -1,0 +1,81 @@
+name: Render Reel
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Remotion & Voice Engine
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install edge-tts --break-system-packages
+          npm install
+
+      - name: Generate Calm Hinglish Voiceover
+        run: |
+          python3 - << 'EOF'
+          import os, re, subprocess
+
+          os.makedirs("public", exist_ok=True)
+          with open("src/Root.tsx", "r", encoding="utf-8") as f:
+              code = f.read()
+
+          voice_match = re.search(r'VOICE\s*=\s*["\']([^"\']+)["\']', code)
+          voice = voice_match.group(1) if voice_match else "en-IN-PrabhatNeural"
+
+          pattern = r'start:\s*(\d+(?:\.\d+)?)\s*,\s*duration:\s*(\d+(?:\.\d+)?)\s*,\s*text:\s*["\']([^"\']+)["\']'
+          scenes = re.findall(pattern, code)
+
+          if not scenes:
+              subprocess.run(["edge-tts", "--voice", voice, "--text", "Video starting now.", "--write-media", "public/voice.mp3"], check=True)
+          else:
+              fixed_clips = []
+              for i, (start, dur, spoken_text) in enumerate(scenes):
+                  dur_f = float(dur)
+                  raw_clip = f"raw_{i}.mp3"
+                  fixed_clip = f"fixed_{i}.wav"
+
+                  subprocess.run([
+                      "edge-tts",
+                      "--voice", voice,
+                      "--rate=-2%",
+                      "--pitch=-2Hz",
+                      "--text", spoken_text,
+                      "--write-media", raw_clip
+                  ], check=True)
+
+                  af = f"apad=whole_dur={dur_f},atrim=0:{dur_f}"
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", raw_clip,
+                      "-af", af, "-ar", "44100", "-ac", "2", fixed_clip
+                  ], check=True)
+                  fixed_clips.append(fixed_clip)
+
+              inputs = []
+              for fc in fixed_clips:
+                  inputs.extend(["-i", fc])
+              concat_filter = "".join(f"[{i}:a]" for i in range(len(fixed_clips))) + f"concat=n={len(fixed_clips)}:v=0:a=1[out]"
+              subprocess.run(["ffmpeg", "-y"] + inputs + ["-filter_complex", concat_filter, "-map", "[out]", "public/voice.mp3"], check=True)
+          EOF
+
+      - name: Render 1080p 60FPS MP4
+        run: npx remotion render Reel Out.mp4 --codec=h264
+
+      - name: Upload Final Video
+        uses: actions/upload-artifact@v4
+        with:
+          name: Final-Reel-MP4
+          path: Out.mp4
+          
